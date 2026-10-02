@@ -79,12 +79,29 @@ def fetch_voyager_position(which: str) -> dict | None:
         return None
 
 
+SWPC_HEADERS = {
+    # NOAA SWPC's services subdomain returns 404 to requests that don't look
+    # like a normal browser (confirmed: the directory listing shows these
+    # files exist, but a plain python-requests/urllib fetch of the file
+    # itself 404s). A browser User-Agent clears it.
+    "User-Agent": (
+        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
+        "(KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36"
+    ),
+    "Accept": "application/json",
+}
+
+
 def fetch_solar_wind_now() -> dict | None:
     import requests
 
     try:
-        plasma = requests.get(SWPC_PLASMA_URL, timeout=20).json()
-        mag = requests.get(SWPC_MAG_URL, timeout=20).json()
+        plasma = requests.get(SWPC_PLASMA_URL, headers=SWPC_HEADERS, timeout=20)
+        plasma.raise_for_status()
+        plasma = plasma.json()
+        mag = requests.get(SWPC_MAG_URL, headers=SWPC_HEADERS, timeout=20)
+        mag.raise_for_status()
+        mag = mag.json()
 
         p_header, p_rows = plasma[0], plasma[1:]
         m_header, m_rows = mag[0], mag[1:]
@@ -111,7 +128,11 @@ def fetch_solar_wind_now() -> dict | None:
         }
     except Exception as e:  # noqa: BLE001
         print(f"  SWPC fetch failed: {e}")
-        return None
+        # Surface the failure in the output itself, not just the Actions
+        # log -- the job exits 0 either way, so this is the only place
+        # future failures (NOAA changing the endpoint again, a timeout,
+        # etc.) will be visible from the deployed page/README.
+        return {"error": str(e), "source": "NOAA SWPC real-time solar wind (DSCOVR, L1)"}
 
 
 def main(out_path: str) -> None:
