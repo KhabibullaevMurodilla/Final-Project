@@ -1,0 +1,416 @@
+diff --git a/voyager-forecast-pipeline/src/fetch_live_data.py b/voyager-forecast-pipeline/src/fetch_live_data.py
+index 45a6ae4..a7473f4 100644
+--- a/voyager-forecast-pipeline/src/fetch_live_data.py
++++ b/voyager-forecast-pipeline/src/fetch_live_data.py
+@@ -14,12 +14,30 @@ pipeline was assembled in, same restriction as fetch_nasa_data.py):
+    script runs.
+ 
+ 2. NOAA Space Weather Prediction Center real-time solar wind
+-   (https://services.swpc.noaa.gov/products/solar-wind/)
+-   Live plasma and magnetic-field readings from the DSCOVR satellite at the
+-   Sun-Earth L1 point, updated roughly every minute. This is a genuinely
+-   different vantage point from Voyager (near Earth, inside the heliosphere,
+-   vs. Voyager far outside it) -- useful as a "conditions near Earth right
+-   now" comparison panel, not a Voyager substitute.
++   (https://services.swpc.noaa.gov/json/rtsw/)
++   Live plasma and magnetic-field readings from whichever spacecraft is
++   currently NOAA's primary real-time-solar-wind (RTSW) source at the
++   Sun-Earth L1 point (DSCOVR, ACE, or newer additions like IMAP/SOLAR1 --
++   NOAA switches the active feed between them), updated roughly every
++   minute. This is a genuinely different vantage point from Voyager (near
++   Earth, inside the heliosphere, vs. Voyager far outside it) -- useful as
++   a "conditions near Earth right now" comparison panel, not a Voyager
++   substitute.
++
++   NOAA retired the old `products/solar-wind/plasma-2-hour.json` /
++   `mag-2-hour.json` endpoints in 2026 -- they now 404 unconditionally, from
++   ANY client (confirmed directly: both a from-the-sandbox fetch and a
++   separate run from GitHub Actions hit the identical 404 on the identical
++   URL). This was NOT a User-Agent/bot-blocking problem despite the header
++   workaround that used to live in this file -- the endpoint itself is
++   gone. The real replacement is the RTSW family
++   (services.swpc.noaa.gov/json/rtsw/rtsw_wind_1m.json and rtsw_mag_1m.json,
++   see https://github.com/qso-graph/solar-mcp/pull/5 for independent
++   confirmation of the same migration), which returns a JSON array of
++   per-instrument-source records (newest first, each tagged "active": true
++   for whichever source NOAA currently trusts) rather than the old
++   header-row + data-rows array, and uses the sentinel -9999 for missing
++   numeric fields instead of null/empty-string.
+ 
+ Output: a small live.json consumed by the web page's "right now" panel.
+ """
+@@ -32,8 +50,11 @@ import os
+ from datetime import datetime, timedelta, timezone
+ 
+ HORIZONS_URL = "https://ssd.jpl.nasa.gov/api/horizons.api"
+-SWPC_PLASMA_URL = "https://services.swpc.noaa.gov/products/solar-wind/plasma-2-hour.json"
+-SWPC_MAG_URL = "https://services.swpc.noaa.gov/products/solar-wind/mag-2-hour.json"
++# 2026 RTSW endpoints -- see the module docstring for why these replaced
++# the old products/solar-wind/*-2-hour.json URLs (those now 404 for everyone).
++SWPC_PLASMA_URL = "https://services.swpc.noaa.gov/json/rtsw/rtsw_wind_1m.json"
++SWPC_MAG_URL = "https://services.swpc.noaa.gov/json/rtsw/rtsw_mag_1m.json"
++NOAA_MISSING_SENTINEL = -9999
+ 
+ KM_PER_AU = 1.495978707e8
+ 
+@@ -80,10 +101,10 @@ def fetch_voyager_position(which: str) -> dict | None:
+ 
+ 
+ SWPC_HEADERS = {
+-    # NOAA SWPC's services subdomain returns 404 to requests that don't look
+-    # like a normal browser (confirmed: the directory listing shows these
+-    # files exist, but a plain python-requests/urllib fetch of the file
+-    # itself 404s). A browser User-Agent clears it.
++    # Kept defensively (costs nothing) even though the 2026 404s turned out
++    # to be a retired endpoint, not a bot-blocking header check -- NOAA's
++    # other products/* paths DID previously 404 non-browser clients, so a
++    # real UA is cheap insurance against that happening here too.
+     "User-Agent": (
+         "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
+         "(KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36"
+@@ -92,6 +113,35 @@ SWPC_HEADERS = {
+ }
+ 
+ 
++def _safe_float(value) -> float | None:
++    """Parse a numeric field, treating NOAA's -9999 missing-data sentinel
++    (and any other non-finite/unparseable value) the same as a real null."""
++    try:
++        f = float(value)
++    except (TypeError, ValueError):
++        return None
++    if f <= NOAA_MISSING_SENTINEL:
++        return None
++    return f
++
++
++def _latest_usable_record(records: list[dict], primary_key: str) -> dict | None:
++    """RTSW returns one record per *source* per timestamp (DSCOVR/ACE/IMAP/
++    SOLAR1/...), newest first, each flagged "active": true for whichever
++    source NOAA currently trusts as the real-time feed. Sort by time_tag
++    defensively (don't assume the API's own ordering holds forever), then
++    prefer the most recent record that is both flagged active and has a
++    real (non-sentinel) value for `primary_key`; fall back to the most
++    recent record with a real value at all if nothing is flagged active.
++    """
++    usable = [r for r in records if _safe_float(r.get(primary_key)) is not None]
++    if not usable:
++        return None
++    usable.sort(key=lambda r: r.get("time_tag", ""), reverse=True)
++    active = [r for r in usable if r.get("active")]
++    return active[0] if active else usable[0]
++
++
+ def fetch_solar_wind_now() -> dict | None:
+     import requests
+ 
+@@ -103,28 +153,21 @@ def fetch_solar_wind_now() -> dict | None:
+         mag.raise_for_status()
+         mag = mag.json()
+ 
+-        p_header, p_rows = plasma[0], plasma[1:]
+-        m_header, m_rows = mag[0], mag[1:]
+-        p_last = [r for r in reversed(p_rows) if all(v not in (None, "") for v in r)][0]
+-        m_last = [r for r in reversed(m_rows) if all(v not in (None, "") for v in r)][0]
+-
+-        p = dict(zip(p_header, p_last))
+-        m = dict(zip(m_header, m_last))
+-
+-        def safe_float(d: dict, key: str):
+-            try:
+-                return float(d.get(key))
+-            except (TypeError, ValueError):
+-                return None
++        p = _latest_usable_record(plasma, "proton_speed")
++        m = _latest_usable_record(mag, "bt")
++        if p is None or m is None:
++            raise ValueError(
++                f"no usable record in RTSW response (plasma_records={len(plasma)}, "
++                f"mag_records={len(mag)}) -- NOAA may have changed the schema again"
++            )
+ 
+         return {
+-            "speed_km_s": safe_float(p, "speed"),
+-            "density_p_cm3": safe_float(p, "density"),
+-            "temperature_k": safe_float(p, "temperature"),
+-            "bt_nT": safe_float(m, "bt"),
++            "speed_km_s": _safe_float(p.get("proton_speed")),
++            "density_p_cm3": _safe_float(p.get("proton_density")),
++            "temperature_k": _safe_float(p.get("proton_temperature")),
++            "bt_nT": _safe_float(m.get("bt")),
+             "time_tag": p.get("time_tag"),
+-            "source": "NOAA SWPC real-time solar wind (DSCOVR, L1)",
+-            "_raw_header_check": {"plasma_fields": p_header, "mag_fields": m_header},
++            "source": f"NOAA SWPC real-time solar wind (RTSW, {p.get('source', 'L1')})",
+         }
+     except Exception as e:  # noqa: BLE001
+         print(f"  SWPC fetch failed: {e}")
+@@ -132,7 +175,7 @@ def fetch_solar_wind_now() -> dict | None:
+         # log -- the job exits 0 either way, so this is the only place
+         # future failures (NOAA changing the endpoint again, a timeout,
+         # etc.) will be visible from the deployed page/README.
+-        return {"error": str(e), "source": "NOAA SWPC real-time solar wind (DSCOVR, L1)"}
++        return {"error": str(e), "source": "NOAA SWPC real-time solar wind (RTSW)"}
+ 
+ 
+ def main(out_path: str) -> None:
+diff --git a/voyager-forecast-pipeline/src/fetch_nasa_data.py b/voyager-forecast-pipeline/src/fetch_nasa_data.py
+index 5c34051..51522cf 100644
+--- a/voyager-forecast-pipeline/src/fetch_nasa_data.py
++++ b/voyager-forecast-pipeline/src/fetch_nasa_data.py
+@@ -27,8 +27,39 @@ BASE_URL = "https://spdf.gsfc.nasa.gov/pub/data/voyager/{sat_dir}/merged/{prefix
+ 
+ SAT_DIRS = {"vy1": "voyager1", "vy2": "voyager2"}
+ 
+-
+-def fetch_year(satellite: str, year: int, out_dir: str, retries: int = 3, timeout: int = 30) -> str | None:
++# A real browser UA, defensively -- NOAA's SWPC subdomain turned out to 404
++# non-browser clients on *some* of its endpoints (see fetch_live_data.py),
++# so the same trick costs nothing here even though spdf.gsfc.nasa.gov has
++# not been observed doing that.
++REQUEST_HEADERS = {
++    "User-Agent": (
++        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
++        "(KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36"
++    ),
++}
++
++# Delay between successive year requests within one run. Fetching ~48 years
++# sequentially with zero gap looks exactly like scraping to a server-side
++# rate limiter, and a run that silently loses most years to connection
++# resets/timeouts (NOT real 404s) is indistinguishable downstream from one
++# where NASA genuinely has no data -- both just produce an empty frame for
++# that year. The original notebook never hit this because it read files
++# that had already been downloaded once into Google Drive; this script is
++# the first thing in this pipeline to actually do 48 back-to-back live HTTP
++# fetches against spdf.gsfc.nasa.gov in a single run.
++REQUEST_DELAY_SECONDS = 0.5
++
++
++def fetch_year(satellite: str, year: int, out_dir: str, retries: int = 4, timeout: int = 45) -> tuple[str | None, str]:
++    """Returns (path_or_None, status) where status is one of:
++    "fetched", "cached", "no_data" (a real 404 -- year genuinely doesn't
++    exist yet), "failed" (retries exhausted on something other than a
++    clean 404 -- network issue, rate limiting, 5xx, timeout). Distinguishing
++    "no_data" from "failed" matters: silently treating a rate-limit/timeout
++    the same as a genuine "this year isn't published" 404 is exactly how a
++    bad run can quietly end up training/forecasting on far less real data
++    than requested without anyone noticing.
++    """
+     import requests  # imported lazily so this file can be inspected without the dependency installed
+ 
+     sat_dir = SAT_DIRS[satellite]
+@@ -37,33 +68,58 @@ def fetch_year(satellite: str, year: int, out_dir: str, retries: int = 3, timeou
+ 
+     if os.path.exists(out_path) and os.path.getsize(out_path) > 0:
+         print(f"  {satellite}_{year}.asc already present, skipping")
+-        return out_path
++        return out_path, "cached"
+ 
+     for attempt in range(1, retries + 1):
+         try:
+-            resp = requests.get(url, timeout=timeout)
++            resp = requests.get(url, headers=REQUEST_HEADERS, timeout=timeout)
+             if resp.status_code == 404:
+                 print(f"  {satellite}_{year}.asc -> 404 (no data for this year yet), skipping")
+-                return None
++                return None, "no_data"
+             resp.raise_for_status()
+             os.makedirs(out_dir, exist_ok=True)
+             with open(out_path, "wb") as f:
+                 f.write(resp.content)
+             print(f"  {satellite}_{year}.asc -> {len(resp.content)/1024:.0f} KB")
+-            return out_path
++            return out_path, "fetched"
+         except Exception as e:  # noqa: BLE001
+             print(f"  attempt {attempt}/{retries} failed for {year}: {e}")
+             time.sleep(2 * attempt)
+-    print(f"  giving up on {satellite}_{year}.asc")
+-    return None
++    print(f"  giving up on {satellite}_{year}.asc after {retries} attempts (network/rate-limit failure, NOT a confirmed 404)")
++    return None, "failed"
+ 
+ 
+ def fetch_range(satellite: str, start_year: int, end_year: int, out_dir: str) -> list[str]:
+     fetched = []
+-    for year in range(start_year, end_year + 1):
+-        path = fetch_year(satellite, year, out_dir)
++    no_data_years: list[int] = []
++    failed_years: list[int] = []
++    years = list(range(start_year, end_year + 1))
++    for i, year in enumerate(years):
++        path, status = fetch_year(satellite, year, out_dir)
+         if path:
+             fetched.append(path)
++        elif status == "no_data":
++            no_data_years.append(year)
++        elif status == "failed":
++            failed_years.append(year)
++        # Only pace the *next* request if we actually hit the network just
++        # now (skip the delay after a cache hit, and after the last year).
++        if status != "cached" and i < len(years) - 1:
++            time.sleep(REQUEST_DELAY_SECONDS)
++
++    print(
++        f"  fetch_range({satellite}, {start_year}-{end_year}): "
++        f"{len(fetched)} fetched, {len(no_data_years)} genuinely absent (404), "
++        f"{len(failed_years)} failed after retries (network/rate-limit, NOT 404)"
++    )
++    if failed_years:
++        print(
++            f"  WARNING: {len(failed_years)} year(s) failed for reasons other than a "
++            f"real 404 and were silently excluded from the merge: {failed_years}. "
++            f"This is very likely NASA/network throttling under rapid sequential "
++            f"requests, not an absence of real data for those years -- re-running, "
++            f"or increasing REQUEST_DELAY_SECONDS/retries, may recover them."
++        )
+     return fetched
+ 
+ 
+diff --git a/voyager-forecast-pipeline/src/predict.py b/voyager-forecast-pipeline/src/predict.py
+index fac20ee..5c85820 100644
+--- a/voyager-forecast-pipeline/src/predict.py
++++ b/voyager-forecast-pipeline/src/predict.py
+@@ -148,7 +148,8 @@ def backtest(location_model, param_model, scaler, df: pd.DataFrame, backtest_hou
+ 
+ 
+ def run(input_csv: str, loc_model_path: str, param_model_path: str,
+-        future_hours: int, out_path: str, backtest_hours: int = 72) -> None:
++        future_hours: int, out_path: str, backtest_hours: int = 72,
++        extra_meta: dict | None = None) -> None:
+ 
+     df = pd.read_csv(input_csv, index_col=0, parse_dates=True)
+     df = df[ALL_COLUMNS]
+@@ -186,6 +187,24 @@ def run(input_csv: str, loc_model_path: str, param_model_path: str,
+     last_date = df.index[-1]
+     future_dates = pd.date_range(start=last_date, periods=future_hours + 1, freq="h")[1:]
+ 
++    first_date = df.index[0]
++    span_hours = max((last_date - first_date).total_seconds() / 3600.0, 1.0)
++    # What fraction of the hours between the first and last real observation
++    # actually survived cleaning. Real Voyager data legitimately has gaps
++    # (instrument dropouts, housekeeping cycles), so this is informational,
++    # not a pass/fail -- but a figure far below what the original notebook
++    # saw for the same satellite/years (its 1977-2015 Voyager 2 cleaning
++    # kept ~79,954 of ~333,000 possible hours, ~24%) is a sign the *fetch*
++    # lost whole years to something other than real data gaps, not that
++    # real coverage is actually this thin.
++    coverage_meta = {
++        "real_data_date_range": [str(first_date), str(last_date)],
++        "real_data_span_hours": round(span_hours, 1),
++        "real_data_row_coverage_pct": round(100.0 * len(df) / span_hours, 2),
++    }
++    if extra_meta:
++        coverage_meta.update(extra_meta)
++
+     result = {
+         "meta": {
+             "seq_length_hours": SEQ_LENGTH,
+@@ -195,6 +214,7 @@ def run(input_csv: str, loc_model_path: str, param_model_path: str,
+             "position_columns": POSITION_COLUMNS,
+             "other_columns": OTHER_COLUMNS,
+             "last_observed_date": str(last_date),
++            **coverage_meta,
+         },
+         "history": {
+             "dates": [str(d) for d in df.index[-500:]],
+diff --git a/voyager-forecast-pipeline/src/run_pipeline.py b/voyager-forecast-pipeline/src/run_pipeline.py
+index 0f8a632..34779c1 100644
+--- a/voyager-forecast-pipeline/src/run_pipeline.py
++++ b/voyager-forecast-pipeline/src/run_pipeline.py
+@@ -55,6 +55,8 @@ def main():
+ 
+     print(f"Step 1/3: fetching real {args.satellite} data, {args.start_year}-{args.end_year} ...")
+     fetched = fetch_range(args.satellite, args.start_year, args.end_year, args.raw_dir)
++    requested_years = args.end_year - args.start_year + 1
++    used_demo_fallback = False
+ 
+     if not fetched:
+         if args.allow_demo_fallback:
+@@ -63,6 +65,7 @@ def main():
+             df = generate_demo_dataframe()
+             os.makedirs(os.path.dirname(args.csv_out), exist_ok=True)
+             df.to_csv(args.csv_out)
++            used_demo_fallback = True
+         else:
+             print("No real files fetched and --allow-demo-fallback not set. Aborting.")
+             sys.exit(1)
+@@ -73,8 +76,31 @@ def main():
+         df.to_csv(args.csv_out)
+         print(f"  {df.shape[0]} clean hourly rows -> {args.csv_out}")
+ 
++        # Loud, hard-to-miss coverage check. A thin fetch (most years lost
++        # to timeouts/rate-limiting rather than real 404s -- see the
++        # WARNING fetch_range itself prints) still "succeeds" here: df is
++        # non-empty, the CSV gets written, and the run proceeds to forecast
++        # off of however little real data actually survived, with nothing
++        # downstream distinguishing that from a genuinely complete fetch.
++        years_fetched = len(fetched)
++        if years_fetched < requested_years * 0.5:
++            print(
++                f"  *** COVERAGE WARNING ***  only {years_fetched}/{requested_years} requested "
++                f"years were actually fetched. The resulting forecast will be built from "
++                f"real data, but a much narrower slice of it than requested -- check the "
++                f"fetch_range summary above for how many years failed vs. were genuinely "
++                f"absent (404). This is the #1 reason the deployed forecast can look like "
++                f"it's stuck on an odd fixed historical window instead of recent data."
++            )
++
+     print("Step 3/3: forecasting with the real trained models ...")
+-    run_predict(args.csv_out, args.loc_model, args.param_model, args.future_hours, args.out, args.backtest_hours)
++    extra_meta = {
++        "fetch_years_requested": requested_years,
++        "fetch_years_used": len(fetched),
++        "used_demo_fallback": used_demo_fallback,
++    }
++    run_predict(args.csv_out, args.loc_model, args.param_model, args.future_hours, args.out, args.backtest_hours,
++                extra_meta=extra_meta)
+     print("Done.")
+ 
+ 
+diff --git a/voyager-forecast-pipeline/web/index.html b/voyager-forecast-pipeline/web/index.html
+index cfd3e12..ede7546 100644
+--- a/voyager-forecast-pipeline/web/index.html
++++ b/voyager-forecast-pipeline/web/index.html
+@@ -260,9 +260,9 @@ input: (120, 31) · output: (28)</div>
+   </section>
+ 
+   <section id="provenance">
+-    <div class="provenance">
++    <div class="provenance" id="provenanceText">
+       <b>On the data behind this page</b>
+-      The two models above are the real ones trained in the original project on actual Voyager-2 telemetry from NASA's Space Physics Data Facility. This page's build sandbox cannot reach NASA's data server directly, so the charts here run on a synthetic dataset built to match that file's real column ranges and noise structure — not a live pull. Point <span class="codepath">preprocess.load_data_dir()</span> at the real <span class="codepath">.asc</span> files from <a href="https://spdf.gsfc.nasa.gov/pub/data/voyager/voyager2/merged/" target="_blank" rel="noopener">NASA's public archive</a> and the same pipeline runs unchanged on genuine telemetry.
++      Loading data provenance…
+     </div>
+   </section>
+ 
+@@ -278,6 +278,29 @@ input: (120, 31) · output: (28)</div>
+ 
+   document.getElementById('statHorizon').textContent = data.meta.future_hours + ' h';
+ 
++  // --- Provenance note: state what's ACTUALLY in forecast.json this run,
++  // instead of a static claim that goes stale the moment the pipeline
++  // starts (or stops) reaching real NASA data. ---
++  (function renderProvenance() {
++    const m = data.meta || {};
++    const el = document.getElementById('provenanceText');
++    const archiveLink = '<a href="https://spdf.gsfc.nasa.gov/pub/data/voyager/voyager2/merged/" target="_blank" rel="noopener">NASA\'s public archive</a>';
++    let body;
++    if (m.used_demo_fallback) {
++      body = `The two models above are the real ones trained in the original project on actual Voyager-2 telemetry from NASA's Space Physics Data Facility. This run could not fetch real data from ${archiveLink} (see the GitHub Actions log for this run), so this build falls back to a synthetic dataset matching that file's real column ranges and noise structure — not a live pull.`;
++    } else if (m.real_data_date_range) {
++      const [start, end] = m.real_data_date_range;
++      const coveragePct = m.real_data_row_coverage_pct != null ? m.real_data_row_coverage_pct + '%' : 'unknown';
++      const yearsNote = (m.fetch_years_used != null && m.fetch_years_requested != null)
++        ? ` (${m.fetch_years_used}/${m.fetch_years_requested} requested years of NASA .asc files were actually fetched this run)`
++        : '';
++      body = `The two models above are the real ones trained in the original project on actual Voyager-2 telemetry from NASA's Space Physics Data Facility. This build's forecast and history charts run on genuine telemetry fetched from ${archiveLink}${yearsNote}: ${m.input_rows} clean hourly rows spanning ${start} to ${end} (${coveragePct} of the hours in that window survived NASA's own missing-value cleaning). That window reflects whatever real data this pipeline run actually retrieved, not necessarily the present day — see the forecast chart's history/future split below for what's genuinely observed vs. predicted.`;
++    } else {
++      body = `The two models above are the real ones trained in the original project on actual Voyager-2 telemetry from NASA's Space Physics Data Facility. This run's data provenance could not be determined from forecast.json's metadata.`;
++    }
++    el.innerHTML = '<b>On the data behind this page</b>' + body;
++  })();
++
+   const isDark = () => {
+     const t = document.documentElement.getAttribute('data-theme');
+     if (t === 'dark') return true;
