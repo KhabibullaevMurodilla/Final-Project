@@ -1,15 +1,15 @@
 {
-  "fetched_at": "2026-10-02T16:06:34.223594+00:00",
+  "fetched_at": "2026-10-02T16:08:15.013620+00:00",
   "voyager1": {
     "distance_au": 171.937,
     "radial_velocity_km_s": 16.882,
-    "as_of": "2026-10-02T16:06:34.858069+00:00",
+    "as_of": "2026-10-02T16:08:15.467975+00:00",
     "source": "JPL Horizons System (live ephemeris)"
   },
   "voyager2": {
     "distance_au": 144.103,
     "radial_velocity_km_s": 15.046,
-    "as_of": "2026-10-02T16:06:35.160897+00:00",
+    "as_of": "2026-10-02T16:08:15.732333+00:00",
     "source": "JPL Horizons System (live ephemeris)"
   },
   "solar_wind_near_earth": {
