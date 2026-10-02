@@ -1,0 +1,78 @@
+name: Update Voyager forecast
+
+# This file must live at the REPO ROOT as .github/workflows/update-forecast.yml
+# (GitHub only reads workflows from that exact path) -- it sits outside the
+# voyager-forecast-pipeline/ add-on folder for that reason.
+#
+# Runs on GitHub's own hosted runner, which has normal internet access, so the
+# fetch from spdf.gsfc.nasa.gov that's blocked in a sandboxed build environment
+# goes through fine here.
+
+on:
+  workflow_dispatch:
+    inputs:
+      start_year:
+        description: "First year of real data to fetch"
+        default: "2015"
+      end_year:
+        description: "Last year of real data to fetch"
+        default: "2025"
+  schedule:
+    - cron: "0 6 * * 1"  # weekly, Monday 06:00 UTC
+
+permissions:
+  contents: write
+  pages: write
+  id-token: write
+
+concurrency:
+  group: pages
+  cancel-in-progress: false
+
+jobs:
+  forecast:
+    runs-on: ubuntu-latest
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install dependencies
+        run: pip install tensorflow-cpu pandas numpy scikit-learn requests
+
+      - name: Fetch real NASA data + run forecast
+        working-directory: voyager-forecast-pipeline
+        run: |
+          python src/run_pipeline.py \
+            --satellite vy2 \
+            --start-year "${{ github.event.inputs.start_year || '2015' }}" \
+            --end-year "${{ github.event.inputs.end_year || '2025' }}" \
+            --future-hours 240 \
+            --out web/forecast.json \
+            --allow-demo-fallback
+
+      - name: Commit updated forecast
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add voyager-forecast-pipeline/web/forecast.json
+          git diff --cached --quiet || git commit -m "Update Voyager forecast with latest NASA data"
+          git push
+
+      # Commits made with the default GITHUB_TOKEN above do NOT trigger
+      # deploy-pages.yml's own `push` event (GitHub blocks that on purpose,
+      # to stop workflow loops) -- so without this, the live site would keep
+      # showing whatever was deployed at the last human push, forever, no
+      # matter how many times this job updates forecast.json. Deploying here
+      # directly closes that gap.
+      - uses: actions/configure-pages@v5
+      - uses: actions/upload-pages-artifact@v3
+        with:
+          path: voyager-forecast-pipeline/web
+      - id: deployment
+        uses: actions/deploy-pages@v4
