@@ -48,12 +48,26 @@ def create_sequences(data: np.ndarray, seq_length: int):
 
 
 def predict_future_locations(model, last_sequence: np.ndarray, steps: int) -> np.ndarray:
-    """Autoregressive rollout of the location model (notebook logic, unchanged)."""
+    """Autoregressive rollout of the location model (notebook logic, unchanged
+    except for one addition -- see the clip below)."""
     future_predictions = []
     current_sequence = last_sequence.copy()
     n_pos = len(POSITION_COLUMNS)
     for _ in range(steps):
         pred = model.predict(current_sequence.reshape(1, SEQ_LENGTH, n_pos), verbose=0)
+        # The model was trained against a MinMaxScaler fit on a different
+        # (larger, differently-ranged) real-data window than whatever gets
+        # fetched on a given run. Feeding its own output back in for 240
+        # straight steps means any small scale mismatch compounds every
+        # step -- confirmed: without this clip, HGI_R was already in the
+        # tens of millions of AU by hour ~130 and climbing exponentially,
+        # eventually overflowing to Infinity (which breaks JSON.parse on
+        # the page entirely, not just that one chart). Clamping each
+        # prediction back into the scaler's valid [0, 1] range before it
+        # becomes next step's input is the standard fix for this failure
+        # mode and keeps every inverse-transformed value inside the
+        # physical range the scaler was actually fit on.
+        pred = np.clip(pred, 0.0, 1.0)
         future_predictions.append(pred[0])
         current_sequence = np.roll(current_sequence, -1, axis=0)
         current_sequence[-1] = pred
@@ -62,12 +76,14 @@ def predict_future_locations(model, last_sequence: np.ndarray, steps: int) -> np
 
 def predict_future_params(model, last_sequence: np.ndarray, future_locations: np.ndarray, steps: int) -> np.ndarray:
     """Autoregressive rollout of the parameter model, fed by the location model's
-    own forecasted positions each step (notebook logic, unchanged)."""
+    own forecasted positions each step (notebook logic, unchanged except for
+    the same clip as predict_future_locations, for the same reason)."""
     n_pos = len(POSITION_COLUMNS)
     future_predictions = []
     current_sequence = last_sequence.copy()
     for i in range(steps):
         pred = model.predict(current_sequence.reshape(1, SEQ_LENGTH, len(ALL_COLUMNS)), verbose=0)
+        pred = np.clip(pred, 0.0, 1.0)
         future_predictions.append(pred[0])
         current_sequence = np.roll(current_sequence, -1, axis=0)
         current_sequence[-1] = np.concatenate([future_locations[i], pred[0]])
@@ -200,9 +216,30 @@ def run(input_csv: str, loc_model_path: str, param_model_path: str,
         "backtest": backtest_result,
     }
 
+    def _finite_or_none(obj):
+        """Safety net: json.dump() happily writes the literal tokens NaN /
+        Infinity for non-finite floats, which is NOT valid JSON -- a
+        browser's JSON.parse throws on them and, because this page runs
+        everything in one sequential script, that one throw blanks the
+        entire page (forecast chart, backtest chart, live panel, all of
+        it), not just the one bad number. The clip in predict_future_*
+        above should prevent non-finite values from ever reaching here;
+        this just guarantees the file is always valid JSON even if a
+        future change to the model/data reintroduces the failure mode.
+        """
+        if isinstance(obj, dict):
+            return {k: _finite_or_none(v) for k, v in obj.items()}
+        if isinstance(obj, list):
+            return [_finite_or_none(v) for v in obj]
+        if isinstance(obj, float) and not np.isfinite(obj):
+            return None
+        return obj
+
+    result = _finite_or_none(result)
+
     os.makedirs(os.path.dirname(out_path), exist_ok=True)
     with open(out_path, "w") as f:
-        json.dump(result, f, indent=2)
+        json.dump(result, f, indent=2, allow_nan=False)
     print(f"Wrote forecast -> {out_path}")
 
 
