@@ -71,7 +71,12 @@ jobs:
           python-version: "3.11"
 
       - name: Install dependencies
-        run: pip install tensorflow-cpu pandas numpy scikit-learn requests
+        # sunpy + astroquery: real position for the forecast window comes from
+        # JPL Horizons' own navigation solution (a deterministic trajectory
+        # computation), not from location_model's LSTM guess -- see
+        # src/horizons_position.py. location_model.h5 is still loaded, but only
+        # to draw an optional side-by-side comparison line now.
+        run: pip install tensorflow-cpu pandas numpy scikit-learn requests sunpy astroquery
 
       - name: Always refresh live Voyager position + solar wind (cheap, a couple of HTTP calls)
         working-directory: voyager-forecast-pipeline
