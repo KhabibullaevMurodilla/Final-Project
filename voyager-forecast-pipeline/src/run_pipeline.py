@@ -55,6 +55,8 @@ def main():
 
     print(f"Step 1/3: fetching real {args.satellite} data, {args.start_year}-{args.end_year} ...")
     fetched = fetch_range(args.satellite, args.start_year, args.end_year, args.raw_dir)
+    requested_years = args.end_year - args.start_year + 1
+    used_demo_fallback = False
 
     if not fetched:
         if args.allow_demo_fallback:
@@ -63,6 +65,7 @@ def main():
             df = generate_demo_dataframe()
             os.makedirs(os.path.dirname(args.csv_out), exist_ok=True)
             df.to_csv(args.csv_out)
+            used_demo_fallback = True
         else:
             print("No real files fetched and --allow-demo-fallback not set. Aborting.")
             sys.exit(1)
@@ -73,8 +76,31 @@ def main():
         df.to_csv(args.csv_out)
         print(f"  {df.shape[0]} clean hourly rows -> {args.csv_out}")
 
+        # Loud, hard-to-miss coverage check. A thin fetch (most years lost
+        # to timeouts/rate-limiting rather than real 404s -- see the
+        # WARNING fetch_range itself prints) still "succeeds" here: df is
+        # non-empty, the CSV gets written, and the run proceeds to forecast
+        # off of however little real data actually survived, with nothing
+        # downstream distinguishing that from a genuinely complete fetch.
+        years_fetched = len(fetched)
+        if years_fetched < requested_years * 0.5:
+            print(
+                f"  *** COVERAGE WARNING ***  only {years_fetched}/{requested_years} requested "
+                f"years were actually fetched. The resulting forecast will be built from "
+                f"real data, but a much narrower slice of it than requested -- check the "
+                f"fetch_range summary above for how many years failed vs. were genuinely "
+                f"absent (404). This is the #1 reason the deployed forecast can look like "
+                f"it's stuck on an odd fixed historical window instead of recent data."
+            )
+
     print("Step 3/3: forecasting with the real trained models ...")
-    run_predict(args.csv_out, args.loc_model, args.param_model, args.future_hours, args.out, args.backtest_hours)
+    extra_meta = {
+        "fetch_years_requested": requested_years,
+        "fetch_years_used": len(fetched),
+        "used_demo_fallback": used_demo_fallback,
+    }
+    run_predict(args.csv_out, args.loc_model, args.param_model, args.future_hours, args.out, args.backtest_hours,
+                extra_meta=extra_meta)
     print("Done.")
 
 
