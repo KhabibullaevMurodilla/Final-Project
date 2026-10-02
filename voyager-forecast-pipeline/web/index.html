@@ -140,7 +140,12 @@
 </style>
 
 <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Newsreader:ital,wght@0,400..600;1,400..500&family=IBM+Plex+Sans:wght@400;500;600&family=IBM+Plex+Mono:wght@400;500&display=swap">
-<script src="https://cdnjs.cloudflare.com/ajax/libs/Chart.js/4.4.4/chart.umd.min.js"></script>
+<!-- 4.4.4 was never a real published Chart.js release on cdnjs -- it 404s
+     unconditionally, for every client, with no exceptions (confirmed
+     directly: a plain fetch of this exact URL returns 404, while the same
+     path with 4.4.1 returns real minified JS). Not an ad-blocker/firewall
+     problem -- the version pin itself was wrong. -->
+<script src="https://cdnjs.cloudflare.com/ajax/libs/Chart.js/4.4.1/chart.umd.min.js"></script>
 
 <div class="wrap">
 
@@ -367,20 +372,25 @@ input: (120, 31) · output: (28)</div>
   const muted = cssVar('--muted');
 
   // Every chart below depends on the Chart.js <script src> tag in <head>
-  // having actually loaded from cdnjs.cloudflare.com. A blocked CDN (ad
-  // blocker, privacy extension, or a network/corporate firewall that blocks
-  // Cloudflare's CDN specifically) fails that <script> tag silently -- no
-  // page-level error -- and the first `new Chart(...)` call would then
-  // throw "Chart is not defined" with no hint why, even though the stats
-  // and provenance text above already rendered fine from real data.
-  // Checking explicitly here, after those, turns a blocked CDN into one
-  // named, specific banner instead of "some charts just don't show up."
+  // having actually loaded. That tag used to pin a version (4.4.4) that
+  // was never a real published release on cdnjs -- it 404s unconditionally
+  // for every client, confirmed directly, nothing to do with ad blockers or
+  // firewalls. Fixed to 4.4.1 (confirmed real). Keeping this check anyway:
+  // a CDN request CAN still legitimately be blocked client-side, and either
+  // way the failure mode is identical ("Chart is not defined", no hint why,
+  // even though the stats/provenance text above already rendered fine from
+  // real data) -- so this still turns it into one named, specific banner
+  // instead of "some charts just don't show up," without guessing which of
+  // the two it is.
   if (typeof Chart === 'undefined') {
     throw new Error(
       "Chart.js failed to load from cdnjs.cloudflare.com (see <head>) -- charts " +
-      "will stay blank even though the data above loaded fine. This is almost " +
-      "always an ad blocker, privacy extension, or network/firewall blocking " +
-      "Cloudflare's CDN, not a problem with this page's data."
+      "will stay blank even though the data above loaded fine. Check the Network " +
+      "tab for the chart.umd.min.js request: a 404 means the pinned version on " +
+      "that <script src> is wrong/no longer published; 'blocked'/no response at " +
+      "all usually means an ad blocker, privacy extension, or network/firewall " +
+      "is blocking Cloudflare's CDN. Either way, it's not a problem with this " +
+      "page's own data."
     );
   }
 
