@@ -260,9 +260,9 @@ input: (120, 31) · output: (28)</div>
   </section>
 
   <section id="provenance">
-    <div class="provenance">
+    <div class="provenance" id="provenanceText">
       <b>On the data behind this page</b>
-      The two models above are the real ones trained in the original project on actual Voyager-2 telemetry from NASA's Space Physics Data Facility. This page's build sandbox cannot reach NASA's data server directly, so the charts here run on a synthetic dataset built to match that file's real column ranges and noise structure — not a live pull. Point <span class="codepath">preprocess.load_data_dir()</span> at the real <span class="codepath">.asc</span> files from <a href="https://spdf.gsfc.nasa.gov/pub/data/voyager/voyager2/merged/" target="_blank" rel="noopener">NASA's public archive</a> and the same pipeline runs unchanged on genuine telemetry.
+      Loading data provenance…
     </div>
   </section>
 
@@ -277,6 +277,29 @@ input: (120, 31) · output: (28)</div>
   const data = await res.json();
 
   document.getElementById('statHorizon').textContent = data.meta.future_hours + ' h';
+
+  // --- Provenance note: state what's ACTUALLY in forecast.json this run,
+  // instead of a static claim that goes stale the moment the pipeline
+  // starts (or stops) reaching real NASA data. ---
+  (function renderProvenance() {
+    const m = data.meta || {};
+    const el = document.getElementById('provenanceText');
+    const archiveLink = '<a href="https://spdf.gsfc.nasa.gov/pub/data/voyager/voyager2/merged/" target="_blank" rel="noopener">NASA\'s public archive</a>';
+    let body;
+    if (m.used_demo_fallback) {
+      body = `The two models above are the real ones trained in the original project on actual Voyager-2 telemetry from NASA's Space Physics Data Facility. This run could not fetch real data from ${archiveLink} (see the GitHub Actions log for this run), so this build falls back to a synthetic dataset matching that file's real column ranges and noise structure — not a live pull.`;
+    } else if (m.real_data_date_range) {
+      const [start, end] = m.real_data_date_range;
+      const coveragePct = m.real_data_row_coverage_pct != null ? m.real_data_row_coverage_pct + '%' : 'unknown';
+      const yearsNote = (m.fetch_years_used != null && m.fetch_years_requested != null)
+        ? ` (${m.fetch_years_used}/${m.fetch_years_requested} requested years of NASA .asc files were actually fetched this run)`
+        : '';
+      body = `The two models above are the real ones trained in the original project on actual Voyager-2 telemetry from NASA's Space Physics Data Facility. This build's forecast and history charts run on genuine telemetry fetched from ${archiveLink}${yearsNote}: ${m.input_rows} clean hourly rows spanning ${start} to ${end} (${coveragePct} of the hours in that window survived NASA's own missing-value cleaning). That window reflects whatever real data this pipeline run actually retrieved, not necessarily the present day — see the forecast chart's history/future split below for what's genuinely observed vs. predicted.`;
+    } else {
+      body = `The two models above are the real ones trained in the original project on actual Voyager-2 telemetry from NASA's Space Physics Data Facility. This run's data provenance could not be determined from forecast.json's metadata.`;
+    }
+    el.innerHTML = '<b>On the data behind this page</b>' + body;
+  })();
 
   const isDark = () => {
     const t = document.documentElement.getAttribute('data-theme');
