@@ -1,0 +1,5 @@
+data/raw/
+data/demo/
+data/*.csv
+__pycache__/
+*.pyc
