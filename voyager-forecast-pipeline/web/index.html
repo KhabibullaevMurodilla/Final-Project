@@ -175,11 +175,11 @@
 
   <section id="trajectory">
     <h2>Heliocentric distance</h2>
-    <p class="lede">The location model — a single-layer LSTM — reads the last 120 hours of position (distance, latitude, longitude) and predicts the next hour, rolled forward autoregressively for the full forecast window.</p>
+    <p class="lede" id="trajectoryLede">Loading…</p>
     <div class="panel">
       <div class="panel-head">
         <span class="panel-title">HGI_R — distance from the Sun (AU)</span>
-        <span class="legend">
+        <span class="legend" id="trajectoryLegend">
           <span><span class="swatch" style="background:var(--muted)"></span>observed</span>
           <span><span class="swatch" style="background:var(--accent)"></span>forecast</span>
         </span>
@@ -341,17 +341,26 @@ input: (120, 31) · output: (28)</div>
     return labels.map((l, i) => i % every === 0 ? l.slice(5, 16) : '');
   }
 
-  function makeChart(canvasId, histVals, fcVals, histColor, fcColor, yLabel){
+  function makeChart(canvasId, histVals, fcVals, histColor, fcColor, yLabel, extraSeries){
     const { labels, histSeries, fcSeries } = buildSeries(data.history.dates, histVals, data.forecast.dates, fcVals);
     const ctx = document.getElementById(canvasId).getContext('2d');
+    const datasets = [
+      { data: histSeries, borderColor: histColor, borderWidth: 1.6, pointRadius: 0, tension: 0.15, spanGaps: false },
+      { data: fcSeries, borderColor: fcColor, borderWidth: 2, borderDash: [5,3], pointRadius: 0, tension: 0.15, spanGaps: false },
+    ];
+    // Optional comparison line (e.g. location_model's own guess) over the
+    // same forecast window, for the same bridged-at-the-seam treatment as
+    // the main forecast series above -- never required, only drawn when
+    // the caller supplies it.
+    if (extraSeries && extraSeries.values) {
+      const { fcSeries: extraFc } = buildSeries(data.history.dates, histVals, data.forecast.dates, extraSeries.values);
+      datasets.push({ data: extraFc, borderColor: extraSeries.color, borderWidth: 1.4, borderDash: [2,2], pointRadius: 0, tension: 0.15, spanGaps: false });
+    }
     return new Chart(ctx, {
       type: 'line',
       data: {
         labels: thinLabels(labels, Math.ceil(labels.length / 10)),
-        datasets: [
-          { data: histSeries, borderColor: histColor, borderWidth: 1.6, pointRadius: 0, tension: 0.15, spanGaps: false },
-          { data: fcSeries, borderColor: fcColor, borderWidth: 2, borderDash: [5,3], pointRadius: 0, tension: 0.15, spanGaps: false },
-        ]
+        datasets
       },
       options: {
         responsive: true, maintainAspectRatio: false,
@@ -394,7 +403,27 @@ input: (120, 31) · output: (28)</div>
     );
   }
 
-  makeChart('chartDist', data.history.HGI_R, data.forecast.HGI_R, muted, accent, 'AU');
+  // Position is no longer an LSTM guess in the normal case: Voyager's deep-
+  // space trajectory is a deterministic orbit-propagation problem, so the
+  // forecast window's HGI_R/Lat/Lon come from JPL Horizons' own navigation
+  // solution for those exact future dates -- an actual physics lookup, not
+  // a prediction -- whenever meta.position_source says so. location_model
+  // (the LSTM) only drives this chart if that Horizons fetch failed
+  // (position_source === "lstm_fallback"), and either way its own guess for
+  // the same window is drawn as a thin dotted comparison line when present,
+  // purely for interest -- it never feeds the parameter forecast's rollout.
+  const usedHorizons = data.meta.position_source === 'jpl_horizons';
+  document.getElementById('trajectoryLede').textContent = usedHorizons
+    ? "This chart's forecast segment is not a model prediction: it's Voyager's real position from JPL Horizons' own navigation solution for these exact future dates -- a deterministic orbit-propagation computation, not a statistical guess. The dotted comparison line shows what the location model (a single-layer LSTM trained on this project's historical data) would have guessed instead, for reference only; it plays no part in the forecast above or in the parameter model's own forecast below."
+    : "JPL Horizons could not be reached for this run, so this forecast segment falls back to the location model's own guess (a single-layer LSTM reading the last 120 hours of position and rolling forward autoregressively) rather than a real trajectory lookup -- less reliable than the normal case.";
+  if (usedHorizons && data.forecast.HGI_R_lstm_guess) {
+    document.getElementById('trajectoryLegend').insertAdjacentHTML('beforeend',
+      '<span><span class="swatch" style="background:' + muted + '; opacity:0.5"></span>LSTM guess (comparison only)</span>');
+  }
+  makeChart('chartDist', data.history.HGI_R, data.forecast.HGI_R, muted, accent, 'AU',
+    usedHorizons && data.forecast.HGI_R_lstm_guess
+      ? { values: data.forecast.HGI_R_lstm_guess, color: muted }
+      : null);
   makeChart('chartFlux', data.history.Flux_1, data.forecast.Flux_1, muted, flux, 'particles/cm²·s·sr·MeV');
 
   // --- Backtest / validation charts ---
