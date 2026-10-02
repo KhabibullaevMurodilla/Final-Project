@@ -12,8 +12,13 @@ on:
   workflow_dispatch:
     inputs:
       start_year:
+        # The original notebook fit its MinMaxScaler on 1977-2015 data --
+        # this pipeline refits a new scaler each run on whatever range it
+        # fetches, so starting in 1977 keeps that scaler close to the one
+        # location_model.h5/param_model.h5 actually trained under, instead
+        # of an arbitrary, disjoint recent window. See run_pipeline.py.
         description: "First year of real data to fetch"
-        default: "2015"
+        default: "1977"
       end_year:
         description: "Last year of real data to fetch"
         default: "2025"
@@ -50,7 +55,7 @@ jobs:
         run: |
           python src/run_pipeline.py \
             --satellite vy2 \
-            --start-year "${{ github.event.inputs.start_year || '2015' }}" \
+            --start-year "${{ github.event.inputs.start_year || '1977' }}" \
             --end-year "${{ github.event.inputs.end_year || '2025' }}" \
             --future-hours 240 \
             --out web/forecast.json \
