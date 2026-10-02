@@ -1,16 +1,19 @@
 {
-  "fetched_at": "2026-10-02T15:14:50.067593+00:00",
+  "fetched_at": "2026-10-02T15:54:02.880005+00:00",
   "voyager1": {
     "distance_au": 171.937,
     "radial_velocity_km_s": 16.882,
-    "as_of": "2026-10-02T15:14:50.640234+00:00",
+    "as_of": "2026-10-02T15:54:03.413658+00:00",
     "source": "JPL Horizons System (live ephemeris)"
   },
   "voyager2": {
     "distance_au": 144.103,
     "radial_velocity_km_s": 15.046,
-    "as_of": "2026-10-02T15:14:50.854680+00:00",
+    "as_of": "2026-10-02T15:54:03.780428+00:00",
     "source": "JPL Horizons System (live ephemeris)"
   },
-  "solar_wind_near_earth": null
+  "solar_wind_near_earth": {
+    "error": "404 Client Error: Not Found for url: https://services.swpc.noaa.gov/products/solar-wind/plasma-2-hour.json",
+    "source": "NOAA SWPC real-time solar wind (DSCOVR, L1)"
+  }
 }
