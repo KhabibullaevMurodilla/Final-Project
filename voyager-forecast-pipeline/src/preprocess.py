@@ -67,8 +67,35 @@ def is_missing(value) -> bool:
     return False
 
 
-def load_asc_file(path: str) -> pd.DataFrame:
-    """Load one raw .asc file with the real 34-column schema."""
+def load_asc_file(path: str) -> pd.DataFrame | None:
+    """Load one raw .asc file with the real 34-column schema.
+
+    Some real NASA merged files don't actually have 34 whitespace-separated
+    fields per row across the full 1977-2025 span -- pandas will still
+    "succeed" and only warn (ParserWarning: "Length of header or names does
+    not match length of data"), but what it does under the hood is drop or
+    misalign columns to make the row fit, which silently corrupts whichever
+    columns end up shifted for that file -- the kind of bug that doesn't
+    show up until a scaler or a model trained on it behaves strangely for
+    reasons nobody can trace back to "year 19xx had 32 fields, not 34."
+    Checking the real field count first and skipping (not guessing how to
+    fix) any file that doesn't match keeps a bad file from silently
+    poisoning the merged dataset -- missing one year of real data is far
+    better than corrupting every year after it.
+    """
+    with open(path) as f:
+        first_data_line = next((line for line in f if line.strip()), "")
+    actual_fields = len(first_data_line.split())
+    expected_fields = len(COLUMN_NAMES)
+    if actual_fields != expected_fields:
+        print(
+            f"  SKIPPING {path}: expected {expected_fields} whitespace-separated "
+            f"fields per row (the real NASA merged-file schema), found "
+            f"{actual_fields} on its first data line. Loading it anyway would "
+            f"silently misalign columns for this file instead of failing "
+            f"loudly, so it's excluded from the merge rather than guessed at."
+        )
+        return None
     df = pd.read_csv(path, sep=r"\s+", header=None, names=COLUMN_NAMES, index_col=False)
     return df
 
@@ -101,7 +128,9 @@ def load_data(file_prefix: str, start_year: int, end_year: int) -> pd.DataFrame:
         path = f"{file_prefix}{year}.asc"
         if not os.path.exists(path):
             continue
-        frames.append(load_asc_file(path))
+        loaded = load_asc_file(path)
+        if loaded is not None:
+            frames.append(loaded)
     if not frames:
         raise FileNotFoundError(
             f"No .asc files found matching {file_prefix}{{{start_year}..{end_year-1}}}.asc"
@@ -116,7 +145,9 @@ def load_data_dir(directory: str, satellite_prefix: str = "vy2_") -> pd.DataFram
     paths = sorted(glob.glob(pattern))
     if not paths:
         raise FileNotFoundError(f"No files matching {pattern}")
-    frames = [load_asc_file(p) for p in paths]
+    frames = [f for f in (load_asc_file(p) for p in paths) if f is not None]
+    if not frames:
+        raise FileNotFoundError(f"No usable files matching {pattern} (all failed the column-count check)")
     df = pd.concat(frames)
     return clean(df)
 
