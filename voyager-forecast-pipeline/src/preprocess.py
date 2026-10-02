@@ -9,14 +9,25 @@ whitespace-delimited, one row per hour. See:
 https://spdf.gsfc.nasa.gov/pub/data/voyager/voyager1/merged/00readme_v1.txt
 https://spdf.gsfc.nasa.gov/pub/data/voyager/voyager2/merged/
 
-Real column layout (34 columns in the raw file):
+Real column layout, confirmed against NASA's own field documentation
+(spdf.gsfc.nasa.gov/pub/data/voyager/voyager2/merged/vy2mgd.txt) -- the raw
+file actually has 37 columns, not 34:
   1-3   : Year, Day-of-year, Hour
   4-6   : Heliographic distance (AU), latitude, longitude  <- "position" columns
-  7-11  : Interplanetary magnetic field: |B| avg, avg-vector, BR, BT, BN
-  12-16 : Solar wind: proton flow speed, elevation angle, azimuth angle,
-          proton density, proton temperature
-  17-34 : 18 proton-flux energy channels (LECP + CRS instruments,
-          <2 MeV up to >300 MeV)
+  7-16  : Interplanetary magnetic field (|B| avg, avg-vector, BR, BT, BN) and
+          solar wind (flow speed, elevation angle, azimuth angle, proton
+          density, proton temperature) -- 10 columns
+  17-19 : 3 LECP proton-flux energy channels (0.52-30.0 MeV)
+  20-37 : 18 CRS proton-flux energy channels (3.0-598.7 MeV)
+
+location_model.h5/param_model.h5 were trained expecting 31 non-time columns
+(3 position + 10 field/wind + 18 flux) -- the ORIGINAL 34-column assumption
+below, which is short exactly the 3 LECP channels. Those weights are frozen,
+so instead of changing what the models expect, RAW_COLUMN_NAMES below parses
+all 37 real columns correctly (so nothing is silently misaligned), and
+load_asc_file drops the 3 LECP_Flux_* columns immediately after parsing --
+the 18 CRS channels keep the name "Flux_1".."Flux_18" so everything
+downstream (ALL_COLUMNS, the models, predict.py) is unchanged.
 
 Missing/fill values in the raw files are encoded as repeating-9 patterns
 (e.g. 999.999, 9999.9, 9.999e+05) -- this mirrors the notebook's `is_missing`
@@ -42,7 +53,31 @@ FIELD_AND_WIND_COLUMNS: List[str] = [
     "V_Flow", "V_Theta", "V_Phi", "Proton_Density", "Proton_Temp",
 ]
 
-FLUX_COLUMNS: List[str] = [f"Flux_{i}" for i in range(1, 19)]
+LECP_COLUMNS: List[str] = ["LECP_1", "LECP_2", "LECP_3"]        # real cols 17-19, 0.52-30.0 MeV
+CRS_COLUMNS: List[str] = [f"CRS_{i}" for i in range(1, 19)]     # real cols 20-37, 3.0-598.7 MeV
+
+# The real schema as it exists in the raw file: 37 columns, in file order.
+RAW_COLUMN_NAMES: List[str] = (
+    ["Year", "Day", "Hour"] + POSITION_COLUMNS + FIELD_AND_WIND_COLUMNS
+    + LECP_COLUMNS + CRS_COLUMNS
+)
+
+# What the notebook's original `names=column_names` (34 entries, missing the
+# 3 LECP channels) actually did against these real 37-column rows: pandas
+# silently used the 34 given names against the first 34 whitespace tokens
+# and dropped the trailing 3. In file order that means the notebook's
+# "Flux_1".."Flux_18" were really: LECP_1, LECP_2, LECP_3, then only the
+# FIRST 15 of the 18 CRS channels -- CRS_16/17/18 (the three highest-energy
+# bands, up to 598.7 MeV) were never seen in training at all, for the
+# entire 1977-2015 training window.
+#
+# The model's weights are frozen, so "fixed" has to mean "matches what it
+# actually learned," not "matches NASA's documented channel order." This
+# reproduces that exact same selection deliberately (not by accident, this
+# time) so real data lines up with the training distribution instead of
+# feeding it 3 flux channels the model never learned to interpret.
+FLUX_TRAIN_SOURCE: List[str] = LECP_COLUMNS + CRS_COLUMNS[:15]  # 3 + 15 = 18, in training order
+FLUX_COLUMNS: List[str] = [f"Flux_{i}" for i in range(1, 19)]   # model-facing names, unchanged everywhere downstream
 
 COLUMN_NAMES: List[str] = (
     ["Year", "Day", "Hour"] + POSITION_COLUMNS + FIELD_AND_WIND_COLUMNS + FLUX_COLUMNS
@@ -68,25 +103,23 @@ def is_missing(value) -> bool:
 
 
 def load_asc_file(path: str) -> pd.DataFrame | None:
-    """Load one raw .asc file with the real 34-column schema.
+    """Load one raw .asc file with the real 37-column schema, then select
+    the exact 18 flux columns (in the exact order) the frozen models were
+    actually trained on -- LECP_1-3 followed by the first 15 CRS channels,
+    renamed to the model-facing Flux_1..Flux_18 -- instead of NASA's
+    documented 18 CRS channels (see the FLUX_TRAIN_SOURCE comment above).
 
-    Some real NASA merged files don't actually have 34 whitespace-separated
-    fields per row across the full 1977-2025 span -- pandas will still
-    "succeed" and only warn (ParserWarning: "Length of header or names does
-    not match length of data"), but what it does under the hood is drop or
-    misalign columns to make the row fit, which silently corrupts whichever
-    columns end up shifted for that file -- the kind of bug that doesn't
-    show up until a scaler or a model trained on it behaves strangely for
-    reasons nobody can trace back to "year 19xx had 32 fields, not 34."
     Checking the real field count first and skipping (not guessing how to
-    fix) any file that doesn't match keeps a bad file from silently
-    poisoning the merged dataset -- missing one year of real data is far
-    better than corrupting every year after it.
+    fix) any file that doesn't match 37 keeps a genuinely malformed file
+    from silently poisoning the merged dataset -- missing one year of real
+    data is far better than corrupting every year after it. This caught the
+    real bug directly: every file from 1977-2024 has 37 fields, confirming
+    the schema itself (not the file) was wrong until this fix.
     """
     with open(path) as f:
         first_data_line = next((line for line in f if line.strip()), "")
     actual_fields = len(first_data_line.split())
-    expected_fields = len(COLUMN_NAMES)
+    expected_fields = len(RAW_COLUMN_NAMES)
     if actual_fields != expected_fields:
         print(
             f"  SKIPPING {path}: expected {expected_fields} whitespace-separated "
@@ -96,7 +129,17 @@ def load_asc_file(path: str) -> pd.DataFrame | None:
             f"loudly, so it's excluded from the merge rather than guessed at."
         )
         return None
-    df = pd.read_csv(path, sep=r"\s+", header=None, names=COLUMN_NAMES, index_col=False)
+    df = pd.read_csv(path, sep=r"\s+", header=None, names=RAW_COLUMN_NAMES, index_col=False)
+
+    # Build the model-facing Flux_1..Flux_18 from exactly what training saw
+    # (LECP_1-3 + the first 15 CRS channels), dropping CRS_16/17/18 -- not
+    # NASA's real channel order, deliberately, to match the frozen weights.
+    flux_block = df[FLUX_TRAIN_SOURCE].copy()
+    flux_block.columns = FLUX_COLUMNS
+    df = pd.concat(
+        [df[["Year", "Day", "Hour"] + POSITION_COLUMNS + FIELD_AND_WIND_COLUMNS], flux_block],
+        axis=1,
+    )
     return df
 
 
