@@ -8,12 +8,13 @@ This started as MSc coursework (`Final_Project.ipynb`) and has since been repack
 
 ### One-time setup to make the results page public
 
-The page lives at `voyager-forecast-pipeline/web/index.html` in this repo. To serve it at the URL above:
+The page lives at `voyager-forecast-pipeline/web/index.html` in this repo. **Use the "GitHub Actions" Pages source, not "Deploy from a branch"** — the branch method only serves `/` or `/docs` and runs everything through Jekyll by default, which fails on a plain HTML folder like this one.
 
-1. Repo **Settings → Pages** → Source: **Deploy from a branch** → Branch `main`, folder `/voyager-forecast-pipeline/web` → Save.
-2. Wait a minute or two for the first build.
+1. Move `deploy-pages.yml` (in `voyager-forecast-pipeline`'s workflow bundle) to `your-repo/.github/workflows/deploy-pages.yml`, alongside the other two workflow files.
+2. Repo **Settings → Pages** → Source: **GitHub Actions**. Don't pick a branch or folder.
+3. Commit and push. GitHub builds and deploys automatically; the live URL shows up under Settings → Pages once it finishes.
 
-That's it — anyone can open that link afterward, no GitHub account or Claude account needed. The two GitHub Actions workflows (below) keep it updated automatically from there.
+That's it — anyone can open that link afterward, no GitHub account or Claude account needed. The three GitHub Actions workflows (below) keep it updated automatically from there.
 
 ## What this is
 
