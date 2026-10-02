@@ -8,21 +8,42 @@ notebook:
 
   1. Fit a MinMaxScaler over the input window (same preprocessing the
      models were trained under).
-  2. location_model: LSTM(64) -> Dense(3), takes the last 120 hours of
-     [HGI_R, HGI_Lat, HGI_Lon] and predicts the next hour's position.
-     Rolled forward autoregressively for `future_steps` hours.
+  2. Position (HGI_R/Lat/Lon) for the forecast window: NOT an LSTM guess in
+     the normal case. Voyager's deep-space trajectory is a deterministic
+     orbit-propagation problem (solar gravity, no atmosphere, no significant
+     unmodeled perturbation), so JPL Horizons' own navigation solution
+     (see horizons_position.py) gives the real position for these exact
+     future dates directly -- an actual physics computation, not a
+     prediction. location_model (LSTM(64) -> Dense(3), as in the original
+     notebook) is kept only as (a) a fallback if Horizons can't be reached,
+     and (b) an optional side-by-side comparison line on the page; it no
+     longer drives the forecast or param_model's rollout in the normal case.
   3. param_model: LSTM(128)->LSTM(64)->LSTM(32)->Dense(28), takes the last
      120 hours of all 31 columns and predicts the next hour's 28
-     non-position parameters (field, solar wind, 18 flux channels).
-     Rolled forward using the location model's own predictions as the
-     position input for each step (exactly as in the notebook).
+     non-position parameters (field, solar wind, 18 flux channels). Rolled
+     forward using the REAL Horizons position (or location_model's guess
+     only on fallback) as the position input for each step -- this is the
+     one part of the original notebook's design that's actually a forecast,
+     since there's no physics shortcut for future field/wind/flux.
   4. Inverse-transform both forecasts back to physical units and export to
-     JSON for the web page.
+     JSON for the web page, recording which position source was actually
+     used (meta.position_source) so the page never claims a physics lookup
+     when it was really a model guess, or vice versa.
 
 Run:
     python predict.py --input ../data/demo/vy2_demo_merged.csv \
                        --future-hours 720 \
-                       --out ../outputs/forecast.json
+                       --out ../web/forecast.json
+
+Note: the default --out below used to be ../outputs/forecast.json, a path
+nothing else in this pipeline reads or writes. A standalone run with that
+default silently produced a second, stale, demo-labeled forecast.json
+sitting in the repo next to the real one the deployed page actually
+fetches (web/forecast.json, written by run_pipeline.py) -- confusing to
+find and easy to mistake for evidence the "real" one is fake too. Default
+changed to point at the same file the deployed page reads, so a standalone
+run and a full pipeline run can never again produce two different
+"forecast.json"s.
 """
 
 from __future__ import annotations
@@ -114,8 +135,20 @@ def backtest(location_model, param_model, scaler, df: pd.DataFrame, backtest_hou
     context = scaled_all[cutoff - SEQ_LENGTH:cutoff]
     actual_future_scaled = scaled_all[cutoff:cutoff + backtest_hours]
 
+    # The backtest window is already-observed real data -- the real position
+    # for it is sitting right there in df, no need to let location_model
+    # guess at something we already know. Driving param_model's rollout
+    # with the REAL position (instead of location_model's own guess, which
+    # has its own compounding error) isolates param_model's actual skill at
+    # the one thing it's for -- field/solar-wind/flux -- instead of
+    # conflating it with location_model's error too.
+    real_future_locations = actual_future_scaled[:, :n_pos]
+    pred_params = predict_future_params(param_model, context, real_future_locations, backtest_hours)
+
+    # Still compute location_model's own guess for this window -- purely as
+    # a side-by-side "how would the LSTM have done" comparison against the
+    # real trajectory in the HGI_R chart below; it no longer drives anything.
     pred_locations = predict_future_locations(location_model, context[:, :n_pos], backtest_hours)
-    pred_params = predict_future_params(param_model, context, pred_locations, backtest_hours)
 
     loc_padded = np.column_stack([pred_locations, np.zeros((backtest_hours, n_other))])
     param_padded = np.column_stack([np.zeros((backtest_hours, n_pos)), pred_params])
@@ -149,7 +182,7 @@ def backtest(location_model, param_model, scaler, df: pd.DataFrame, backtest_hou
 
 def run(input_csv: str, loc_model_path: str, param_model_path: str,
         future_hours: int, out_path: str, backtest_hours: int = 72,
-        extra_meta: dict | None = None) -> None:
+        extra_meta: dict | None = None, satellite: str = "voyager2") -> None:
 
     df = pd.read_csv(input_csv, index_col=0, parse_dates=True)
     df = df[ALL_COLUMNS]
@@ -172,20 +205,58 @@ def run(input_csv: str, loc_model_path: str, param_model_path: str,
     last_location_seq = X[-1, :, :n_pos]
     last_full_seq = X[-1]
 
-    print(f"Forecasting {future_hours} hours ahead (autoregressive rollout) ...")
-    future_locations = predict_future_locations(location_model, last_location_seq, future_hours)
-    future_params = predict_future_params(param_model, last_full_seq, future_locations, future_hours)
-
-    # Inverse-transform back to physical units
-    n_other = len(OTHER_COLUMNS)
-    loc_padded = np.column_stack([future_locations, np.zeros((future_hours, n_other))])
-    param_padded = np.column_stack([np.zeros((future_hours, n_pos)), future_params])
-
-    future_locations_original = scaler.inverse_transform(loc_padded)[:, :n_pos]
-    future_params_original = scaler.inverse_transform(param_padded)[:, n_pos:]
-
     last_date = df.index[-1]
     future_dates = pd.date_range(start=last_date, periods=future_hours + 1, freq="h")[1:]
+
+    # Position isn't actually a good thing to forecast with an LSTM: Voyager's
+    # deep-space trajectory is a deterministic orbit-propagation problem (solar
+    # gravity, no atmosphere, no significant unmodeled perturbation), and JPL's
+    # own navigation solution (Horizons) can compute it exactly for these same
+    # future dates -- there's no reason to let location_model guess at
+    # something that already has an authoritative physics answer. Try that
+    # first; fall back to the LSTM's own guess only if Horizons can't be
+    # reached (e.g. a transient network issue), and record which one actually
+    # happened in meta so the page never claims a physics lookup when it was
+    # really a model guess.
+    print(f"Forecasting {future_hours} hours ahead (autoregressive rollout) ...")
+    position_source = "jpl_horizons"
+    try:
+        from horizons_position import fetch_horizons_hgi
+
+        hgi_real = fetch_horizons_hgi(satellite, future_dates)
+        future_locations_original = hgi_real[POSITION_COLUMNS].to_numpy()
+        # param_model's rollout still needs these in the same SCALED space its
+        # own training/other inputs live in, since it concatenates them back
+        # into the rolling input sequence at each autoregressive step.
+        loc_padded_for_scaling = np.column_stack(
+            [future_locations_original, np.zeros((future_hours, len(OTHER_COLUMNS)))]
+        )
+        future_locations = scaler.transform(loc_padded_for_scaling)[:, :n_pos]
+        future_locations = np.clip(future_locations, 0.0, 1.0)
+    except Exception as e:  # noqa: BLE001
+        print(f"  Horizons position fetch failed ({e}); falling back to location_model's own forecast.")
+        position_source = "lstm_fallback"
+        future_locations = predict_future_locations(location_model, last_location_seq, future_hours)
+        loc_padded = np.column_stack([future_locations, np.zeros((future_hours, len(OTHER_COLUMNS)))])
+        future_locations_original = scaler.inverse_transform(loc_padded)[:, :n_pos]
+
+    future_params = predict_future_params(param_model, last_full_seq, future_locations, future_hours)
+
+    # Still compute location_model's own guess for the SAME dates, purely as
+    # an optional "how would the LSTM have done" comparison line on the page
+    # -- it no longer drives param_model's rollout above.
+    try:
+        lstm_guess_locations = predict_future_locations(location_model, last_location_seq, future_hours)
+        lstm_loc_padded = np.column_stack([lstm_guess_locations, np.zeros((future_hours, len(OTHER_COLUMNS)))])
+        lstm_guess_locations_original = scaler.inverse_transform(lstm_loc_padded)[:, :n_pos]
+    except Exception as e:  # noqa: BLE001
+        print(f"  location_model comparison forecast failed (non-fatal): {e}")
+        lstm_guess_locations_original = None
+
+    # Inverse-transform the parameter forecast back to physical units
+    n_other = len(OTHER_COLUMNS)
+    param_padded = np.column_stack([np.zeros((future_hours, n_pos)), future_params])
+    future_params_original = scaler.inverse_transform(param_padded)[:, n_pos:]
 
     first_date = df.index[0]
     span_hours = max((last_date - first_date).total_seconds() / 3600.0, 1.0)
@@ -214,6 +285,7 @@ def run(input_csv: str, loc_model_path: str, param_model_path: str,
             "position_columns": POSITION_COLUMNS,
             "other_columns": OTHER_COLUMNS,
             "last_observed_date": str(last_date),
+            "position_source": position_source,  # "jpl_horizons" (real trajectory) or "lstm_fallback"
             **coverage_meta,
         },
         "history": {
@@ -226,12 +298,24 @@ def run(input_csv: str, loc_model_path: str, param_model_path: str,
         },
         "forecast": {
             "dates": [str(d) for d in future_dates],
+            # Real JPL Horizons trajectory when position_source == "jpl_horizons"
+            # (the normal case); location_model's own guess only if that fetch
+            # failed (position_source == "lstm_fallback").
             "HGI_R": future_locations_original[:, 0].round(4).tolist(),
             "HGI_Lat": future_locations_original[:, 1].round(4).tolist(),
             "HGI_Lon": future_locations_original[:, 2].round(4).tolist(),
             "B_Avg": future_params_original[:, OTHER_COLUMNS.index("B_Avg")].round(5).tolist(),
             "Flux_1": future_params_original[:, OTHER_COLUMNS.index("Flux_1")].round(6).tolist(),
             "Proton_Density": future_params_original[:, OTHER_COLUMNS.index("Proton_Density")].round(6).tolist(),
+            # Optional side-by-side comparison: what location_model (the LSTM)
+            # would have guessed for these same dates, had it driven the
+            # forecast instead of the real trajectory above. Purely informational
+            # -- never fed back into param_model's own rollout. None if even
+            # this comparison forecast failed.
+            "HGI_R_lstm_guess": (
+                lstm_guess_locations_original[:, 0].round(4).tolist()
+                if lstm_guess_locations_original is not None else None
+            ),
         },
         "backtest": backtest_result,
     }
@@ -270,6 +354,6 @@ if __name__ == "__main__":
     p.add_argument("--param-model", default="../models/param_model.h5")
     p.add_argument("--future-hours", type=int, default=720)
     p.add_argument("--backtest-hours", type=int, default=72)
-    p.add_argument("--out", default="../outputs/forecast.json")
+    p.add_argument("--out", default="../web/forecast.json")
     args = p.parse_args()
     run(args.input, args.loc_model, args.param_model, args.future_hours, args.out, args.backtest_hours)
