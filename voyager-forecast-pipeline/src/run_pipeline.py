@@ -99,8 +99,9 @@ def main():
         "fetch_years_used": len(fetched),
         "used_demo_fallback": used_demo_fallback,
     }
+    satellite_full_name = {"vy1": "voyager1", "vy2": "voyager2"}[args.satellite]
     run_predict(args.csv_out, args.loc_model, args.param_model, args.future_hours, args.out, args.backtest_hours,
-                extra_meta=extra_meta)
+                extra_meta=extra_meta, satellite=satellite_full_name)
     print("Done.")
 
 
