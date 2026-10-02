@@ -90,7 +90,7 @@ jobs:
             echo "run=${{ github.event.inputs.run_forecast != 'false' }}" >> "$GITHUB_OUTPUT"
           fi
 
-      - name: Fetch real NASA data + run forecast (slow: full historical range)
+      - name: "Fetch real NASA data + run forecast (slow: full historical range)"
         if: steps.gate.outputs.run == 'true'
         working-directory: voyager-forecast-pipeline
         run: |
