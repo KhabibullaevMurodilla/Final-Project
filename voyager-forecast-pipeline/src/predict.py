@@ -148,7 +148,8 @@ def backtest(location_model, param_model, scaler, df: pd.DataFrame, backtest_hou
 
 
 def run(input_csv: str, loc_model_path: str, param_model_path: str,
-        future_hours: int, out_path: str, backtest_hours: int = 72) -> None:
+        future_hours: int, out_path: str, backtest_hours: int = 72,
+        extra_meta: dict | None = None) -> None:
 
     df = pd.read_csv(input_csv, index_col=0, parse_dates=True)
     df = df[ALL_COLUMNS]
@@ -186,6 +187,24 @@ def run(input_csv: str, loc_model_path: str, param_model_path: str,
     last_date = df.index[-1]
     future_dates = pd.date_range(start=last_date, periods=future_hours + 1, freq="h")[1:]
 
+    first_date = df.index[0]
+    span_hours = max((last_date - first_date).total_seconds() / 3600.0, 1.0)
+    # What fraction of the hours between the first and last real observation
+    # actually survived cleaning. Real Voyager data legitimately has gaps
+    # (instrument dropouts, housekeeping cycles), so this is informational,
+    # not a pass/fail -- but a figure far below what the original notebook
+    # saw for the same satellite/years (its 1977-2015 Voyager 2 cleaning
+    # kept ~79,954 of ~333,000 possible hours, ~24%) is a sign the *fetch*
+    # lost whole years to something other than real data gaps, not that
+    # real coverage is actually this thin.
+    coverage_meta = {
+        "real_data_date_range": [str(first_date), str(last_date)],
+        "real_data_span_hours": round(span_hours, 1),
+        "real_data_row_coverage_pct": round(100.0 * len(df) / span_hours, 2),
+    }
+    if extra_meta:
+        coverage_meta.update(extra_meta)
+
     result = {
         "meta": {
             "seq_length_hours": SEQ_LENGTH,
@@ -195,6 +214,7 @@ def run(input_csv: str, loc_model_path: str, param_model_path: str,
             "position_columns": POSITION_COLUMNS,
             "other_columns": OTHER_COLUMNS,
             "last_observed_date": str(last_date),
+            **coverage_meta,
         },
         "history": {
             "dates": [str(d) for d in df.index[-500:]],
