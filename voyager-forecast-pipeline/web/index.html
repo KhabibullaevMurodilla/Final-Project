@@ -273,7 +273,20 @@ input: (120, 31) · output: (28)</div>
 
 <script>
 (async function(){
+ try {
+  // If this fetch throws -- most commonly because the page is being opened
+  // as a local file (file://...index.html) instead of through the actual
+  // published URL, which browsers block fetch() from doing for security
+  // reasons regardless of whether forecast.json itself is fine -- every
+  // single dynamic piece of this page (stats, charts, backtest, live
+  // panel, provenance note) previously died silently right here, leaving
+  // nothing but the static markup visible with no indication why. The
+  // try/catch around the whole body now turns that into a visible,
+  // specific banner instead of a page that just looks hardcoded.
   const res = await fetch('forecast.json');
+  if (!res.ok) {
+    throw new Error(`forecast.json responded with HTTP ${res.status}`);
+  }
   const data = await res.json();
 
   document.getElementById('statHorizon').textContent = data.meta.future_hours + ' h';
@@ -353,6 +366,24 @@ input: (120, 31) · output: (28)</div>
   const flux = cssVar('--flux');
   const muted = cssVar('--muted');
 
+  // Every chart below depends on the Chart.js <script src> tag in <head>
+  // having actually loaded from cdnjs.cloudflare.com. A blocked CDN (ad
+  // blocker, privacy extension, or a network/corporate firewall that blocks
+  // Cloudflare's CDN specifically) fails that <script> tag silently -- no
+  // page-level error -- and the first `new Chart(...)` call would then
+  // throw "Chart is not defined" with no hint why, even though the stats
+  // and provenance text above already rendered fine from real data.
+  // Checking explicitly here, after those, turns a blocked CDN into one
+  // named, specific banner instead of "some charts just don't show up."
+  if (typeof Chart === 'undefined') {
+    throw new Error(
+      "Chart.js failed to load from cdnjs.cloudflare.com (see <head>) -- charts " +
+      "will stay blank even though the data above loaded fine. This is almost " +
+      "always an ad blocker, privacy extension, or network/firewall blocking " +
+      "Cloudflare's CDN, not a problem with this page's data."
+    );
+  }
+
   makeChart('chartDist', data.history.HGI_R, data.forecast.HGI_R, muted, accent, 'AU');
   makeChart('chartFlux', data.history.Flux_1, data.forecast.Flux_1, muted, flux, 'particles/cm²·s·sr·MeV');
 
@@ -431,5 +462,16 @@ input: (120, 31) · output: (28)</div>
   } catch (e) {
     // live.json not present yet (no Actions run on this copy) -- the placeholder text already covers this.
   }
+ } catch (err) {
+  // Surface the failure instead of leaving the page silently static.
+  const isFileProtocol = window.location.protocol === 'file:';
+  const banner = document.createElement('div');
+  banner.style.cssText = 'background:#c4601f;color:#fff;padding:14px 20px;font-family:ui-monospace,monospace;font-size:13px;line-height:1.5;';
+  banner.innerHTML = isFileProtocol
+    ? `<b>Data didn't load.</b> This page is open as a local file (<code>${window.location.href}</code>) -- browsers block loading <code>forecast.json</code> that way for security reasons. Open the published site instead: <a href="https://khabibullaevmurodilla.github.io/Final-Project/" style="color:#fff;text-decoration:underline">khabibullaevmurodilla.github.io/Final-Project</a>.`
+    : `<b>Data didn't load.</b> Fetching <code>forecast.json</code> failed: ${err.message}. Everything below the header is static markup until this is fixed.`;
+  document.body.prepend(banner);
+  console.error('forecast.json load failed:', err);
+ }
 })();
 </script>
