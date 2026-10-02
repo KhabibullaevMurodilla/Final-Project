@@ -8,7 +8,7 @@ sandbox this pipeline was built in).
 
 Usage:
     python src/run_pipeline.py \
-        --satellite vy2 --start-year 2015 --end-year 2025 \
+        --satellite vy2 --start-year 1977 --end-year 2025 \
         --future-hours 240 --out web/forecast.json
 """
 
@@ -28,7 +28,17 @@ from predict import run as run_predict
 def main():
     p = argparse.ArgumentParser()
     p.add_argument("--satellite", choices=["vy1", "vy2"], default="vy2")
-    p.add_argument("--start-year", type=int, default=2015)
+    # The original notebook trained location_model.h5/param_model.h5 with a
+    # MinMaxScaler fit on 1977-2015 data (cell 18/25: df_train = load_data(
+    # ..., 1977, 2015); scaler.fit_transform(df_train[all_columns])). This
+    # pipeline refits a fresh scaler every run on whatever range it fetches
+    # -- if that range doesn't overlap 1977-2015, the refit scaler's min/max
+    # has nothing to do with the scaling the frozen model weights actually
+    # expect, and feeding mis-scaled inputs into a 240-step autoregressive
+    # rollout compounds the mismatch until it diverges. Defaulting to 1977
+    # keeps the refit scaler close to the one the models were really trained
+    # under, instead of an arbitrary disjoint window.
+    p.add_argument("--start-year", type=int, default=1977)
     p.add_argument("--end-year", type=int, default=2025)
     p.add_argument("--raw-dir", default="data/raw")
     p.add_argument("--csv-out", default="data/real_merged.csv")
