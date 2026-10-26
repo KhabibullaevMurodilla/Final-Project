@@ -1,13 +1,13 @@
 {
-  "fetched_at": "2026-10-26T12:17:43.310816+00:00",
+  "fetched_at": "2026-10-26T14:19:56.422828+00:00",
   "voyager1": null,
   "voyager2": null,
   "solar_wind_near_earth": {
-    "speed_km_s": 333.2,
-    "density_p_cm3": 4.26,
-    "temperature_k": 58173.0,
-    "bt_nT": 5.82,
-    "time_tag": "2026-10-26T12:12:00",
+    "speed_km_s": 344.7,
+    "density_p_cm3": 4.89,
+    "temperature_k": 66675.0,
+    "bt_nT": 6.01,
+    "time_tag": "2026-10-26T14:12:00",
     "source": "NOAA SWPC real-time solar wind (RTSW, SOLAR1)"
   }
 }
