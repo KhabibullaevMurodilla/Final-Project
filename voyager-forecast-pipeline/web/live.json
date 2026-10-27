@@ -1,23 +1,23 @@
 {
-  "fetched_at": "2026-10-27T13:16:22.171246+00:00",
+  "fetched_at": "2026-10-27T19:27:56.918230+00:00",
   "voyager1": {
     "distance_au": 172.18,
     "radial_velocity_km_s": 16.882,
-    "as_of": "2026-10-27T13:16:22.775667+00:00",
+    "as_of": "2026-10-27T19:27:57.555909+00:00",
     "source": "JPL Horizons System (live ephemeris)"
   },
   "voyager2": {
     "distance_au": 144.32,
     "radial_velocity_km_s": 15.046,
-    "as_of": "2026-10-27T13:16:23.223241+00:00",
+    "as_of": "2026-10-27T19:27:58.273159+00:00",
     "source": "JPL Horizons System (live ephemeris)"
   },
   "solar_wind_near_earth": {
-    "speed_km_s": 421.6,
-    "density_p_cm3": 3.08,
-    "temperature_k": 99044.0,
-    "bt_nT": 5.08,
-    "time_tag": "2026-10-27T13:09:00",
+    "speed_km_s": 393.0,
+    "density_p_cm3": 2.27,
+    "temperature_k": 114073.0,
+    "bt_nT": 5.52,
+    "time_tag": "2026-10-27T19:21:00",
     "source": "NOAA SWPC real-time solar wind (RTSW, SOLAR1)"
   }
 }
